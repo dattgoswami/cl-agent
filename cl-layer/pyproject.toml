@@ -11,6 +11,24 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+train = [
+    "mlx-lm>=0.21",
+    "mlx>=0.21",
+    "transformers>=4.46",
+    "peft>=0.13",
+    "torch>=2.5",
+    "unsloth[colab-new]>=2025.4.0",
+    "datasets>=3.0",
+    "trl>=0.14",
+    "protobuf<5",
+    "xgrammar>=0.1.6",
+    "gguf>=0.10",
+]
+search = [
+    "scipy>=1.14",
+    "numpy>=2.1",
+]
+serve = ["requests>=2.32"]
 
 [tool.setuptools.packages.find]
 where = ["."]

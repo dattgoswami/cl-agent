@@ -82,3 +82,8 @@ paper/*
 *.h
 
 .claude/
+
+plan-qwen.md
+prompt-qwen-by-codex.md
+spec-sft-cl-agent.md
+findings.md
