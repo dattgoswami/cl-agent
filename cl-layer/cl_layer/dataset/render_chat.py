@@ -1,4 +1,13 @@
-"""Chat JSONL rendering with configurable template."""
+"""Chat-template config + dataset rendering for SFT.
+
+Single source of truth for the ChatML template the student model is trained on.
+``serve/modelfile.py`` reads the same ``ChatTemplate`` and emits an Ollama
+``TEMPLATE`` that produces byte-identical ChatML at inference time. Keeping
+both sides on this one config is what prevents the train/serve template
+mismatch the spec calls out as a primary risk.
+
+No optional/heavy dependencies are imported here.
+"""
 
 from __future__ import annotations
 
@@ -8,46 +17,81 @@ from dataclasses import dataclass
 from cl_layer.dataset.example_schema import TrainingExample
 
 
-@dataclass
+@dataclass(frozen=True)
 class ChatTemplate:
-    """A Qwen/Ollama-compatible chat template."""
+    """ChatML template configuration. Defaults match Qwen2.5-Coder-Instruct.
 
-    system_prompt: str
-    user_format: str
-    assistant_format: str
-    eos_token: str = "<|im_end|>"
+    Fields are *content* (system message text) and *role markers* (the literal
+    ChatML boundary tokens). Together they define the on-the-wire string
+    rendered for each turn.
+    """
 
-    def render_turn(self, role: str, content: str) -> str:
-        if role == "system":
-            return self.system_prompt
-        if role == "user":
-            return self.user_format.format(content=content)
-        if role == "assistant":
-            return self.assistant_format.format(content=content)
-        raise ValueError(f"Unknown role: {role}")
+    system_prompt: str = "You are a helpful coding assistant."
+    role_start: str = "<|im_start|>"
+    role_end: str = "<|im_end|>"
 
+    @property
+    def eos_token(self) -> str:
+        return self.role_end
 
-# Default Qwen/Ollama-compatible template
-DEFAULT_CHAT_TEMPLATE = ChatTemplate(
-    system_prompt="<|im_start|>system\nYou are a helpful coding assistant.<|im_end|>",
-    user_format="<|im_start|>user\n{content}<|im_end|>",
-    assistant_format="<|im_start|>assistant\n{content}<|im_end|>",
-)
+    @property
+    def stop_tokens(self) -> tuple[str, ...]:
+        return (self.role_end, self.role_start)
 
 
-def render_example_chat(example: TrainingExample, template: ChatTemplate | None = None) -> str:
-    """Render a single example as chat JSONL."""
+DEFAULT_CHAT_TEMPLATE = ChatTemplate()
+
+
+def example_to_messages(
+    example: TrainingExample, template: ChatTemplate | None = None
+) -> list[dict[str, str]]:
+    """Build the canonical ``messages`` list for one training example."""
     template = template or DEFAULT_CHAT_TEMPLATE
-    user_content = example.input_text
-    assistant_content = example.target_text
-
-    lines = [template.render_turn("system", "")]
-    lines.append(template.render_turn("user", user_content))
-    lines.append(template.render_turn("assistant", assistant_content))
-
-    return template.eos_token.join(line for line in lines if line)
+    return [
+        {"role": "system", "content": template.system_prompt},
+        {"role": "user", "content": example.input_text},
+        {"role": "assistant", "content": example.target_text},
+    ]
 
 
-def render_examples_chatl(examples: list[TrainingExample], template: ChatTemplate | None = None) -> list[str]:
-    """Render a list of examples as chat JSONL lines."""
-    return [render_example_chat(ex, template) for ex in examples]
+def render_messages_chatml(
+    messages: list[dict[str, str]], template: ChatTemplate | None = None
+) -> str:
+    """Render a list of ``{role, content}`` messages as a ChatML string.
+
+    Each turn is wrapped exactly once. Turns are separated by a single
+    newline; the trailing ``role_end`` is emitted by the turn itself, so the
+    output never contains ``<|im_end|><|im_end|>``.
+    """
+    template = template or DEFAULT_CHAT_TEMPLATE
+    return "\n".join(
+        f"{template.role_start}{m['role']}\n{m['content']}{template.role_end}"
+        for m in messages
+    )
+
+
+def render_example_chat(
+    example: TrainingExample, template: ChatTemplate | None = None
+) -> str:
+    """Render one example as a ChatML string (system + user + assistant)."""
+    return render_messages_chatml(example_to_messages(example, template), template)
+
+
+def render_example_jsonl(
+    example: TrainingExample, template: ChatTemplate | None = None
+) -> str:
+    """Render one example as a single JSONL line: ``{"messages": [...]}``."""
+    record = {"messages": example_to_messages(example, template)}
+    return json.dumps(record, ensure_ascii=False)
+
+
+def render_examples_chatl(
+    examples: list[TrainingExample], template: ChatTemplate | None = None
+) -> list[str]:
+    """Render a list of examples as JSON-Lines suitable for a dataset file.
+
+    Each element is a JSON object string with a ``messages`` array containing
+    ``system``/``user``/``assistant`` roles. Write the list to disk by
+    joining with ``"\\n"`` to get a valid ``.jsonl`` file.
+    """
+    return [render_example_jsonl(ex, template) for ex in examples]

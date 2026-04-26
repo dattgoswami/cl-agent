@@ -17,10 +17,18 @@ class ModelHandle:
 
 @dataclass
 class TrainConfig:
-    """SFT training configuration."""
+    """SFT training configuration.
+
+    ``output_dir`` is the directory where the backend places training
+    artifacts (config dump, adapter, fuse export, GGUF). It MUST be distinct
+    from ``dataset_dir`` — the backend rejects configs that would write
+    into the dataset directory. When ``output_dir`` is ``None`` the backend
+    derives a sibling path of ``dataset_dir`` (e.g. ``<parent>/train_output``).
+    """
 
     model_id: str
     dataset_dir: str
+    output_dir: str | None = None
     epochs: int = 3
     batch_size: int = 4
     iterations: int = 1000

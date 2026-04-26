@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cl_layer.dataset.render_chat import (
+    ChatTemplate,
+    DEFAULT_CHAT_TEMPLATE,
+    render_messages_chatml,
+)
 from cl_layer.serve.modelfile import generate_modelfile, write_modelfile
 from cl_layer.serve.ollama_create import ollama_create, ollama_exists
 from cl_layer.serve.ollama_smoke import smoke_test_ollama
@@ -18,13 +24,117 @@ class TestModelfile:
         assert "/tmp/model.gguf" in content
         assert "FROM /tmp/model.gguf" in content
 
-    def test_generate_modelfile_contains_template(self):
-        content = generate_modelfile("/tmp/model.gguf", "cl-agent-qwen:gen-1")
-        assert "ollama" in content.lower() or "template" in content.lower()
+    def test_system_block_has_opening_and_closing_triple_quotes(self):
+        content = generate_modelfile("/tmp/model.gguf", system_prompt="hello world")
+        # The whole SYSTEM block must be triple-quoted.
+        match = re.search(r'^SYSTEM """(.*?)"""', content, re.MULTILINE | re.DOTALL)
+        assert match is not None, f"no triple-quoted SYSTEM block in:\n{content}"
+        assert match.group(1) == "hello world"
 
-    def test_generate_modelfile_custom_system(self):
-        content = generate_modelfile("/tmp/model.gguf", "cl-agent-qwen:gen-1", system_prompt="Be concise.")
-        assert "Be concise." in content
+    def test_template_block_has_opening_and_closing_triple_quotes(self):
+        content = generate_modelfile("/tmp/model.gguf")
+        match = re.search(r'^TEMPLATE """(.*?)"""', content, re.MULTILINE | re.DOTALL)
+        assert match is not None, f"no triple-quoted TEMPLATE block in:\n{content}"
+        body = match.group(1)
+        # Body must use Ollama Go-template variables, not Python format placeholders.
+        assert "{{ .Prompt }}" in body
+        assert "{{ .Response }}" in body
+        assert "{{ .System }}" in body
+        assert "{content}" not in body
+
+    def test_modelfile_does_not_have_unbalanced_system_directive(self):
+        # Catches the prior bug where SYSTEM was emitted as
+        # `SYSTEM <prompt>` followed only by a *closing* triple-quote.
+        content = generate_modelfile("/tmp/model.gguf", system_prompt="prompt")
+        # No SYSTEM line that lacks an opening triple-quote.
+        for line in content.splitlines():
+            if line.startswith("SYSTEM"):
+                assert line.startswith('SYSTEM """'), (
+                    f"SYSTEM line missing opening triple-quote: {line!r}"
+                )
+
+    def test_modelfile_has_stop_parameters_for_chatml_boundaries(self):
+        content = generate_modelfile("/tmp/model.gguf")
+        assert 'PARAMETER stop "<|im_end|>"' in content
+        assert 'PARAMETER stop "<|im_start|>"' in content
+
+    def test_modelfile_has_temperature_and_ctx_parameters(self):
+        content = generate_modelfile("/tmp/model.gguf", temperature=0.3, num_ctx=8192)
+        assert "PARAMETER temperature 0.3" in content
+        assert "PARAMETER num_ctx 8192" in content
+
+    def test_modelfile_custom_system_prompt(self):
+        content = generate_modelfile("/tmp/model.gguf", system_prompt="Be concise.")
+        assert 'SYSTEM """Be concise."""' in content
+
+    def test_modelfile_uses_default_system_when_unset(self):
+        content = generate_modelfile("/tmp/model.gguf")
+        assert f'SYSTEM """{DEFAULT_CHAT_TEMPLATE.system_prompt}"""' in content
+
+    def test_modelfile_golden(self):
+        """Pin the full Modelfile output for the default template so any drift
+        between trainer and Ollama runtime is caught immediately."""
+        tmpl = ChatTemplate(system_prompt="SYS")
+        content = generate_modelfile(
+            "/tmp/model.gguf",
+            chat_template=tmpl,
+            temperature=0.7,
+            num_ctx=4096,
+        )
+        expected = (
+            "FROM /tmp/model.gguf\n"
+            "\n"
+            "PARAMETER temperature 0.7\n"
+            "PARAMETER num_ctx 4096\n"
+            'PARAMETER stop "<|im_end|>"\n'
+            'PARAMETER stop "<|im_start|>"\n'
+            "\n"
+            'SYSTEM """SYS"""\n'
+            "\n"
+            'TEMPLATE """{{ if .System }}<|im_start|>system\n'
+            "{{ .System }}<|im_end|>\n"
+            "{{ end }}{{ if .Prompt }}<|im_start|>user\n"
+            "{{ .Prompt }}<|im_end|>\n"
+            "{{ end }}<|im_start|>assistant\n"
+            '{{ .Response }}<|im_end|>"""\n'
+        )
+        assert content == expected
+
+    def test_modelfile_template_body_matches_trainer_chatml(self):
+        """The TEMPLATE body, after substituting Ollama variables with concrete
+        values, must equal what ``render_messages_chatml`` produces for the
+        same system/user/assistant content. This is the core train↔serve
+        parity guarantee."""
+        tmpl = ChatTemplate(system_prompt="ignored")
+        content = generate_modelfile("/tmp/model.gguf", chat_template=tmpl)
+        match = re.search(r'^TEMPLATE """(.*?)"""', content, re.MULTILINE | re.DOTALL)
+        assert match is not None
+        body = match.group(1)
+
+        # Simulate Ollama's Go-template substitution: both .System and .Prompt
+        # are present, so the conditional branches both render.
+        substituted = (
+            body.replace("{{ if .System }}", "")
+            .replace("{{ end }}{{ if .Prompt }}", "")
+            .replace("{{ end }}", "")
+            .replace("{{ .System }}", "S")
+            .replace("{{ .Prompt }}", "U")
+            .replace("{{ .Response }}", "A")
+        )
+        trainer_view = render_messages_chatml(
+            [
+                {"role": "system", "content": "S"},
+                {"role": "user", "content": "U"},
+                {"role": "assistant", "content": "A"},
+            ],
+            tmpl,
+        )
+        assert substituted == trainer_view
+
+    def test_modelfile_no_double_eos_after_substitution(self):
+        content = generate_modelfile("/tmp/model.gguf")
+        # The TEMPLATE body itself must not contain back-to-back EOS tokens.
+        assert "<|im_end|><|im_end|>" not in content
 
     def test_write_modelfile(self, tmp_path: Path):
         content = "FROM /tmp/model.gguf\n"

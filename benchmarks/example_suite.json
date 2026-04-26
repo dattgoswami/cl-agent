@@ -1,0 +1,37 @@
+{
+  "name": "phase1-smoke",
+  "tasks": [
+    {
+      "task_id": "fastapi-health-001",
+      "prompt": "Add a /health endpoint that returns {\"status\": \"ok\"}.",
+      "category": "repo_local",
+      "split": "valid",
+      "domain": "fastapi",
+      "tags": ["endpoint", "smoke"],
+      "repo_path": "fixtures/fastapi-app",
+      "verifier_commands": [
+        {
+          "name": "pytest",
+          "command": ["python", "-m", "pytest", "tests/test_health.py"],
+          "expected_exit_code": 0
+        }
+      ]
+    },
+    {
+      "task_id": "swebench-issue-7421",
+      "prompt": "Fix the off-by-one in datetime parsing for ISO week numbers.",
+      "category": "external_slice",
+      "split": "test",
+      "domain": "datetime",
+      "tags": ["bugfix", "iso8601"]
+    },
+    {
+      "task_id": "synthetic-import-fix-001",
+      "prompt": "Fix the missing import: ModuleNotFoundError: No module named 'auth'.",
+      "category": "synthetic_repair",
+      "split": "train",
+      "domain": "auth",
+      "tags": ["import", "repair"]
+    }
+  ]
+}

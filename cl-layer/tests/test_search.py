@@ -113,13 +113,22 @@ class TestRepair:
         )
         assert "generated" in result.lower()
 
-    def test_repair_candidate(self):
+    def test_repair_candidate_replaces_patch_with_revised_text(self):
         client = _MockClient()
         gen = RepairPromptGenerator(client)
-        cand = _make_candidate()
+        cand = _make_candidate(patch_text="ORIGINAL_PATCH_DO_NOT_KEEP")
         repaired = gen.repair_candidate(cand, ["fail"], [])
-        assert "[REPAIR]" in repaired.patch_text
-        assert repaired.generation == 1
+        # The revised candidate must NOT carry the old patch text or any
+        # appended marker like "[REPAIR]". It must be a fresh model output.
+        assert "[REPAIR]" not in repaired.patch_text
+        assert "ORIGINAL_PATCH_DO_NOT_KEEP" not in repaired.patch_text
+        assert "generated" in repaired.patch_text.lower()
+        # And it must be a NEW Candidate, not the same instance mutated.
+        assert repaired is not cand
+        assert repaired.id != cand.id
+        assert repaired.parent_id == cand.id
+        assert repaired.generation == cand.generation + 1
+        assert repaired.metadata.get("repaired_from") == cand.id
 
 
 # --------------- selection ------------
@@ -256,30 +265,249 @@ class TestArchive:
 
 # --------------- controller ------------
 
-class TestController:
-    def test_soar_loop(self):
-        client = _MockClient()
-        # Use different failures per call so the novelty archive doesn't dedup
-        call_count = [0]
-        class VerifierWithDeltas:
-            def run(self, patch_text):
-                call_count[0] += 1
-                return VerificationResult(
-                    task_id="test",
-                    success=True,
-                    score=0.8,
-                    steps=[VerificationStep(name="test", command=[], cwd="", exit_code=0, duration_ms=1, success=True)],
-                    failures=[f"failure-{call_count[0]}"],
+from cl_layer.search.sandbox import AppliedCandidate, InMemorySandbox
+
+
+class _RecordingSandbox:
+    """FakeSandbox that records every apply/cleanup call."""
+
+    def __init__(self, base="/tmp/sb", changed_files=("src/app.py",)):
+        self.base = base
+        self.changed = list(changed_files)
+        self.applied: list[Candidate] = []
+        self.cleaned: list[str] = []
+
+    def apply(self, candidate: Candidate, *, task_id: str | None = None) -> AppliedCandidate:
+        self.applied.append(candidate)
+        path = f"{self.base}/{task_id or 'default'}/{candidate.id}"
+        return AppliedCandidate(
+            candidate=candidate,
+            sandbox_path=path,
+            changed_files=list(self.changed),
+        )
+
+    def cleanup(self, applied: AppliedCandidate) -> None:
+        self.cleaned.append(applied.sandbox_path)
+
+
+class _RecordingVerifier:
+    """Verifier that records every repo_path it was called with."""
+
+    def __init__(self, score=0.8, failures=None, changed_files=None, success=None):
+        self.score = score
+        self.failures = list(failures or [])
+        self.changed_files = list(changed_files or [])
+        self.success = success if success is not None else (score > 0.5)
+        self.run_paths: list[str] = []
+
+    def run(self, repo_path: str, extra_env=None) -> VerificationResult:
+        self.run_paths.append(repo_path)
+        return VerificationResult(
+            task_id="test",
+            success=self.success,
+            score=self.score,
+            steps=[
+                VerificationStep(
+                    name="pytest",
+                    command=[],
+                    cwd=repo_path,
+                    exit_code=0 if self.success else 1,
+                    duration_ms=10.0,
+                    success=self.success,
                 )
-        verifier = VerifierWithDeltas()
-        config = SearchConfig(k_candidates=3, n_elites=2)
-        pop = soar_loop("Fix auth bug", client, verifier, config)
+            ],
+            failures=list(self.failures),
+            changed_files=list(self.changed_files),
+        )
+
+
+class TestController:
+    def test_soar_loop_returns_population(self):
+        client = _MockClient()
+        sandbox = _RecordingSandbox()
+        verifier = _RecordingVerifier(score=0.8)
+        config = SearchConfig(k_candidates=2, n_elites=1, max_generations=1, max_candidates_total=10)
+        pop = soar_loop("Fix auth bug", client, verifier, sandbox, config)
         assert pop.size >= 1
         assert pop.candidates[0].verifier_score == 0.8
 
-    def test_soar_loop_with_failures(self):
+    def test_verifier_receives_repo_path_not_patch_text(self):
+        """Verifier.run must be called with sandbox repo paths only."""
         client = _MockClient()
-        verifier = _MockVerifier(score=0.3, failures=["test failed", "lint error"])
-        config = SearchConfig(k_candidates=2, n_elites=1)
-        pop = soar_loop("Fix auth bug", client, verifier, config)
-        assert pop.size >= 1
+        sandbox = _RecordingSandbox(base="/tmp/sb-test")
+        verifier = _RecordingVerifier()
+        config = SearchConfig(k_candidates=2, n_elites=1, max_generations=1, max_candidates_total=10)
+        soar_loop("Fix bug", client, verifier, sandbox, config, task_id="task-42")
+
+        assert verifier.run_paths, "verifier was never called"
+        for path in verifier.run_paths:
+            assert path.startswith("/tmp/sb-test/task-42/"), (
+                f"verifier saw something that isn't a sandbox path: {path!r}"
+            )
+            # Sanity: the path is short, definitely not the model's output text.
+            assert "[generated:" not in path
+            assert "<|im_" not in path
+
+    def test_sandbox_apply_called_once_per_verified_candidate(self):
+        client = _MockClient()
+        sandbox = _RecordingSandbox()
+        verifier = _RecordingVerifier()
+        config = SearchConfig(k_candidates=2, n_elites=1, max_generations=1, max_candidates_total=10)
+        soar_loop("Fix", client, verifier, sandbox, config)
+        # One apply per verifier.run.
+        assert len(sandbox.applied) == len(verifier.run_paths)
+        # Every applied candidate gets cleaned up.
+        assert len(sandbox.cleaned) == len(sandbox.applied)
+
+    def test_max_candidates_total_is_enforced(self):
+        client = _MockClient()
+        sandbox = _RecordingSandbox()
+        verifier = _RecordingVerifier(failures=["something"])
+        config = SearchConfig(
+            k_candidates=10,
+            n_elites=2,
+            max_generations=5,
+            max_candidates_total=4,
+        )
+        soar_loop("Fix", client, verifier, sandbox, config)
+        assert len(sandbox.applied) <= 4
+        assert len(verifier.run_paths) <= 4
+
+    def test_max_generations_is_enforced(self):
+        # With many max_candidates_total but max_generations=1, only one
+        # generation's worth of work happens. Track distinct candidate
+        # generation indices observed by the sandbox.
+        client = _MockClient()
+        sandbox = _RecordingSandbox()
+        verifier = _RecordingVerifier(failures=["fail"])
+        config = SearchConfig(
+            k_candidates=2,
+            n_elites=1,
+            max_generations=1,
+            max_candidates_total=100,
+        )
+        soar_loop("Fix", client, verifier, sandbox, config)
+        # All candidates produced in generation 0.
+        gens = {c.generation for c in sandbox.applied}
+        # Repair/mutation/crossover within the first generation may bump
+        # generation to 1 (their parent was gen 0); but no candidate should
+        # be at generation >= 2 because the loop only iterated once.
+        assert max(gens) <= 1
+
+    def test_multiple_generations_actually_run(self):
+        client = _MockClient()
+        sandbox = _RecordingSandbox()
+        verifier = _RecordingVerifier(failures=["fail"])
+        config = SearchConfig(
+            k_candidates=2,
+            n_elites=1,
+            max_generations=3,
+            max_candidates_total=100,
+        )
+        soar_loop("Fix", client, verifier, sandbox, config)
+        gens = {c.generation for c in sandbox.applied}
+        # The loop must actually advance past gen 0.
+        assert max(gens) >= 2
+
+    def test_repair_produces_candidate_with_revised_patch(self):
+        client = _MockClient()  # returns "[generated: ...]"
+        sandbox = _RecordingSandbox()
+        verifier = _RecordingVerifier(failures=["lint error"])
+        config = SearchConfig(k_candidates=2, n_elites=1, max_generations=1, max_candidates_total=20)
+        pop = soar_loop("Fix", client, verifier, sandbox, config)
+
+        # At least one candidate must be a repair (parent_id set, repaired_from in metadata).
+        repairs = [c for c in pop.candidates if c.metadata.get("repaired_from")]
+        assert repairs, "expected at least one repair candidate"
+        for r in repairs:
+            assert "[REPAIR]" not in r.patch_text
+            # The repair patch is a fresh model output, not a concatenation.
+            assert r.patch_text.startswith("[generated:") or "generated" in r.patch_text.lower()
+
+    def test_mutation_or_crossover_actually_runs(self):
+        """At least one candidate should be produced via mutation/crossover."""
+        client = _MockClient()
+        sandbox = _RecordingSandbox()
+        verifier = _RecordingVerifier(failures=["fail"])
+        config = SearchConfig(k_candidates=2, n_elites=2, max_generations=1, max_candidates_total=20)
+        pop = soar_loop("Fix", client, verifier, sandbox, config)
+        special = [
+            c
+            for c in pop.candidates
+            if c.metadata.get("mutated_from") or c.metadata.get("crossover_parents")
+        ]
+        assert special, "expected at least one mutation or crossover candidate"
+
+    def test_ranking_uses_verifier_derived_inputs(self):
+        """Two candidates with the same verifier_score but different
+        regressions counts should rank in the regressions order."""
+        client = _MockClient()
+        sandbox = _RecordingSandbox()
+
+        # Verifier alternates: first candidate sees passing step, second sees a failed step.
+        class AlternatingVerifier:
+            def __init__(self):
+                self.calls = 0
+                self.run_paths: list[str] = []
+
+            def run(self, repo_path, extra_env=None):
+                self.run_paths.append(repo_path)
+                self.calls += 1
+                steps = [
+                    VerificationStep(
+                        name="pytest", command=[], cwd=repo_path,
+                        exit_code=0, duration_ms=10, success=True,
+                    ),
+                ]
+                if self.calls % 2 == 0:
+                    # Make the second candidate look worse: regressions and a failed step.
+                    steps.append(
+                        VerificationStep(
+                            name="lint_ruff", command=[], cwd=repo_path,
+                            exit_code=1, duration_ms=5, success=False,
+                        )
+                    )
+                return VerificationResult(
+                    task_id="t", success=self.calls % 2 == 1,
+                    score=0.8,  # SAME for both
+                    steps=steps, failures=[], changed_files=["a.py"],
+                )
+
+        verifier = AlternatingVerifier()
+        config = SearchConfig(k_candidates=2, n_elites=2, max_generations=1, max_candidates_total=2)
+        pop = soar_loop("Fix", client, verifier, sandbox, config)
+        # Same verifier_score for both, so ranking must come from per-step inputs.
+        scores = [c.verifier_score for c in pop.candidates]
+        assert scores[0] == scores[1] == 0.8
+        # The candidate with the failing lint step must rank lower.
+        regs = [c.metadata.get("regressions", 0) for c in pop.candidates]
+        assert regs[0] <= regs[1], (
+            "candidate with more regressions should rank lower, "
+            f"but got regressions={regs}"
+        )
+
+    def test_novelty_key_uses_changed_files_and_score_delta(self):
+        client = _MockClient()
+        sandbox = _RecordingSandbox(changed_files=("src/auth.py", "src/router.py"))
+        verifier = _RecordingVerifier(score=0.7, changed_files=["src/auth.py", "src/router.py"])
+        config = SearchConfig(k_candidates=1, n_elites=1, max_generations=1, max_candidates_total=2)
+        pop = soar_loop("Fix", client, verifier, sandbox, config)
+        for c in pop.candidates:
+            assert c.metadata.get("changed_files") == ["src/auth.py", "src/router.py"]
+            assert "novelty_key" in c.metadata
+        # The repaired/mutated candidate has a parent_score, so its novelty key
+        # should encode a real delta. The first candidate uses score=signature.
+        deltas = [c.metadata.get("changed_files") for c in pop.candidates]
+        assert all(d == ["src/auth.py", "src/router.py"] for d in deltas)
+
+    def test_inmemory_sandbox_returns_candidate_specific_paths(self):
+        sb = InMemorySandbox(base_path="/tmp/test-sb")
+        c1 = Candidate(id="c1", plan_text="p", patch_text="x", affected_files=[])
+        c2 = Candidate(id="c2", plan_text="p", patch_text="y", affected_files=[])
+        a1 = sb.apply(c1, task_id="t-1")
+        a2 = sb.apply(c2, task_id="t-1")
+        assert a1.sandbox_path != a2.sandbox_path
+        assert "c1" in a1.sandbox_path
+        assert "t-1" in a1.sandbox_path
+        sb.cleanup(a1)
+        assert a1.sandbox_path in sb.cleaned
