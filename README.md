@@ -1,10 +1,15 @@
 # cl-agent — Continual-Learning Substrate for Coding Agents
 
-A **Codex-first continual-learning substrate** that attaches to coding agents you already use, records what they tried, distills what worked, and injects that knowledge forward so the agent measurably improves across sessions — without model fine-tuning.
+A **Codex-first continual-learning substrate** that attaches to coding agents you already use, records what they tried, distills what worked, and injects that knowledge forward so the agent measurably improves across sessions.
+
+The repo now ships **two complementary learning systems**:
+
+1. **Symbolic substrate (v1)** — episode capture, replay, rule-based distillation, and forward injection. Improves the agent without touching model weights. ([Paper](paper/cl_agent_paper_pub.pdf))
+2. **SOAR-style search + SFT pipeline (v2)** — sandboxed sample/refine/repair search, verifier-driven scoring, hindsight relabeling, dataset construction, periodic LoRA fine-tuning of a small student model (Qwen2.5-Coder-3B), GGUF export, and Ollama deployment with a four-mode benchmark runner that feeds promotion gates.
+
+The two systems are kept deliberately separate. The symbolic layer stays inspectable and reversible; the parametric layer captures patterns too subtle for prompt artifacts alone.
 
 > The durable asset is the learning loop, not the runtime shell.
-
-**Paper:** [cl-agent: A Continual-Learning Substrate for Coding Agents](paper/cl_agent_paper_pub.pdf)
 
 ---
 
@@ -76,11 +81,18 @@ Removing any one pillar degrades the project into something less useful: without
 ┌────────────────────────────────────────────────────────────┐
 │ CL Layer   (cl-layer/)                                     │
 │                                                            │
-│  episode/   — normalized schema + JSONL recorder           │
-│  replay/    — domain-heuristic buffer, no embeddings       │
-│  distill/   — rule-based skills, dreams, program writers   │
-│  eval/      — operational + research metrics  (Phase 4)    │
-│  mcp/       — MCP server interface            (Phase 6)    │
+│  Symbolic plane (v1):                                      │
+│    episode/   — normalized schema + JSONL recorder         │
+│    replay/    — domain-heuristic buffer, no embeddings     │
+│    distill/   — rule-based skills, dreams, program writers │
+│                                                            │
+│  Research / data plane (v2):                               │
+│    dataset/   — episodes → JSONL splits + manifest         │
+│    verify/    — sandboxed runner + git changed-file        │
+│    search/    — SOAR sample/refine/repair + sandbox        │
+│    train/     — MLX trainer shell + promotion gates        │
+│    serve/     — Ollama Modelfile + GGUF export             │
+│    eval/      — benchmark loader + 4-mode runner           │
 └────────────────────────────┬───────────────────────────────┘
                              │
                              ▼
@@ -104,21 +116,71 @@ cl-agent/
 │   ├── pyproject.toml
 │   └── cl_layer/
 │       ├── episode/
-│       │   ├── schema.py           # EpisodeEvent, EpisodeOutcome, Episode
+│       │   ├── schema.py           # Episode + 25 training-grade fields
 │       │   └── recorder.py         # append-only JSONL store
 │       ├── replay/
 │       │   └── buffer.py           # domain/mode-filtered replay queries
-│       └── distill/
-│           ├── skills.py           # rule-based skill candidates → SKILLS.md
-│           ├── dreams.py           # session summary → DREAMS.md
-│           └── program.py          # next-run context → PROGRAM.md
+│       ├── distill/
+│       │   ├── skills.py           # SKILLS.md
+│       │   ├── dreams.py           # DREAMS.md
+│       │   └── program.py          # PROGRAM.md
+│       │
+│       ├── dataset/                # v2: episodes → SFT JSONL
+│       │   ├── from_episode.py     # strict, patch_text-required
+│       │   ├── filters.py          # verifier / size / hidden-state
+│       │   ├── dedup.py            # patch-hash + normalized-text
+│       │   ├── splits.py           # leak-proof, grouped by task_id
+│       │   ├── render_chat.py      # ChatTemplate + JSONL renderer
+│       │   └── builder.py          # build_dataset() + DatasetManifest
+│       │
+│       ├── verify/                 # v2: sandboxed verification
+│       │   ├── base.py             # VerificationResult, CommandRunner
+│       │   ├── python_repo.py      # injectable runner + git changed_files
+│       │   ├── pytest_runner.py    # pytest step builder
+│       │   ├── lint_runner.py      # ruff/flake8 step builder
+│       │   ├── typecheck_runner.py # mypy step builder
+│       │   └── score.py            # weighted scoring helpers
+│       │
+│       ├── search/                 # v2: SOAR sample/refine/repair
+│       │   ├── sandbox.py          # Sandbox protocol + InMemorySandbox
+│       │   ├── sampler.py          # plan → patch via model client
+│       │   ├── repair.py           # revised-patch repair (no append)
+│       │   ├── selection.py        # weighted score from metadata
+│       │   ├── mutation.py         # prompt / file-scope / hunk
+│       │   ├── crossover.py        # disjoint-files / non-overlapping
+│       │   ├── archive.py          # novelty keys with real deltas
+│       │   └── controller.py       # multi-generation soar_loop()
+│       │
+│       ├── train/                  # v2: trainer backends + promotion
+│       │   ├── base.py             # TrainerBackend, TrainConfig
+│       │   ├── mlx_backend.py      # MLXTrainerBackend + injectable runner
+│       │   ├── unsloth_backend.py  # NotImplemented stub
+│       │   ├── promotion.py        # PromotionGate (+5% / -2% / smoke)
+│       │   ├── registry.py         # backend registry
+│       │   └── export.py           # export manifest helpers
+│       │
+│       ├── serve/                  # v2: Ollama deployment
+│       │   ├── modelfile.py        # valid Modelfile generator
+│       │   ├── ollama_create.py    # `ollama create` wrapper
+│       │   └── ollama_smoke.py     # smoke prompts via injectable client
+│       │
+│       └── eval/                   # v2: benchmark + mode comparison
+│           ├── benchmark.py        # BenchmarkSuite.from_path (JSON/YAML)
+│           ├── runner.py           # 4-mode runner + EvaluationResult
+│           └── modes.py            # baseline / symbolic / search / search_sft
 │
-└── adapters/
-    └── codex/
-        ├── README.md               # adapter setup and usage
-        ├── context_builder.py      # RunContext from task + artifacts
-        ├── item_mapper.py          # ThreadItem → EpisodeEvent
-        └── sdk_runner.py           # CodexRunner — full run lifecycle
+├── adapters/
+│   └── codex/
+│       ├── README.md
+│       ├── context_builder.py
+│       ├── item_mapper.py
+│       └── sdk_runner.py
+│
+├── benchmarks/                     # v2: benchmark fixtures
+│   └── example_suite.json          # 3 tasks across all 3 categories
+├── configs/                        # v2: trainer/search/eval configs
+└── data/                           # v2: runtime artifacts
+    ├── episodes/  datasets/  models/  exports/  reports/
 ```
 
 ---
@@ -145,8 +207,11 @@ pip install -e /path/to/codex/sdk/python   # Codex SDK
 
 ```bash
 python -m pytest cl-layer/tests/ -v
-# 22 tests, all passing, no network dependency
+# 252 tests, all passing in <0.2s
+# no network, no MLX, no Torch, no Ollama, no real model calls
 ```
+
+The full suite imports cleanly without any optional ML dependency installed (MLX, Torch, Transformers, PEFT, TRL, Unsloth, requests, PyYAML are all lazy or test-injected).
 
 ### 3. Run a task through the adapter
 
@@ -256,16 +321,30 @@ All four files are human-readable and git-diffable. If a skill entry looks wrong
 
 ## Build Phases
 
+### v1 — Symbolic substrate
+
 | Phase | Status | Deliverable |
 |-------|--------|-------------|
 | 0 — Architecture lock | Done | `spec.md`, `spec-validation.md`, `plan.md` |
-| 1 — Core data plane | Done | `episode/`, `replay/`, 22 passing tests |
+| 1 — Core data plane | Done | `episode/`, `replay/` |
 | 2 — Distillation | Done | `distill/skills.py`, `distill/dreams.py`, `distill/program.py` |
 | 3 — Codex adapter | Done | `adapters/codex/` grounded in the local SDK |
-| 4 — Evaluation layer | Planned | `cl_layer/eval/reward.py`, `cl_layer/eval/metrics.py` |
-| 5 — Benchmark harness | Planned | Narrow domain suite, baseline vs learned comparison |
-| 6 — MCP interface | Planned | `cl_layer/mcp/server.py` — `cl/context`, `cl/log`, `cl/search`, `cl/metrics` |
-| 7 — Second agent surface | Planned | Hermes adapter, same core unchanged |
+
+### v2 — SOAR-style search + SFT pipeline
+
+The v2 plane was added on top of v1 to close the "second half of the loop": search over candidate solutions, verifier-driven refinement, hindsight relabeling, periodic SFT, and Ollama deployment.
+
+| Phase | Status | Deliverable |
+|-------|--------|-------------|
+| Phase 0 — Instrumentation | Done | 25 training-grade fields on `Episode`, 9 new event kinds, back-compat tests |
+| Phase 1 — Dataset builder | Done | `dataset/builder.py` — episodes → JSONL splits + manifest, leak-proof grouping by `task_id`, patch-hash dedup |
+| Phase 1 — Chat template + Modelfile | Done | One `ChatTemplate` shared by `dataset/render_chat.py` and `serve/modelfile.py`; trainer↔Ollama parity guaranteed by golden test |
+| Phase 1 — Verifier framework | Done | Injectable `CommandRunner`, `task_id` threading, best-effort `git status --porcelain` for `changed_files` |
+| Phase 1 — MLX trainer shell | Done | `MLXTrainerBackend` calls injectable runner for `train_lora`/`fuse_model`/`convert_gguf`; `output_dir` separate from `dataset_dir` |
+| Phase 1 — Ollama serve | Done | Valid Modelfile with `SYSTEM` / `TEMPLATE` triple-quote blocks and Go-template variables; mocked smoke tests |
+| Phase 2 — SOAR controller | Done | Sandboxed multi-generation `soar_loop()`; verifier sees repo paths only; `max_generations` and `max_candidates_total` enforced; weighted scoring from real verifier inputs; novelty archive with real score deltas |
+| Phase 1 — Eval + promotion | Done | `BenchmarkSuite.from_path()` (JSON, optional YAML); 4-mode runner (`baseline` / `symbolic` / `search` / `search_sft`) → `EvaluationResult` → `PromotionGate` (+5% lift / −2% regression / smoke / latency) |
+| Integration smoke | Done | `tests/test_integration_learning_path.py` walks episodes → dataset → mocked train/fuse/gguf → Modelfile in <50 ms |
 
 ---
 
@@ -287,6 +366,38 @@ All four files are human-readable and git-diffable. If a skill entry looks wrong
 
 - **CL Layer** — `cl-layer/README.md`: episode model, distillation policy, evaluation design, contribution guidelines, architectural guardrails
 - **Codex Adapter** — `adapters/codex/README.md`: setup, mode semantics, item-type mapping table, integration details
+
+---
+
+## References
+
+The v1 substrate paper is at [`paper/cl_agent_paper_pub.pdf`](paper/cl_agent_paper_pub.pdf).
+
+### External research and tools the v2 layer draws on
+
+**SOAR** — the LLM-guided sample-refine-search framework for ARC tasks. The v2 search loop adapts SOAR's ARC loop (sample → execute → verify → select → refine → relabel → curate → fine-tune → evaluate → promote) to the software-engineering setting.
+- Pourcel et al., *"SOAR: Self-Improving Optimization Agent via Reinforcement learning"* — paper on arXiv: <https://arxiv.org/abs/2507.14172>
+- PMLR 2025 version: <https://proceedings.mlr.press/v267/pourcel25a.html>
+- Reference implementation: <https://github.com/flowersteam/SOAR>
+
+**MLX-LM** — primary local trainer target for Apple Silicon.
+- <https://github.com/ml-explore/mlx-lm>
+- LoRA recipe: <https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/LORA.md>
+
+**Unsloth** — secondary trainer backend for NVIDIA/Linux experiments.
+- <https://unsloth.ai/docs/get-started/fine-tuning-for-beginners/unsloth-requirements>
+- Saving to Ollama: <https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-ollama>
+- Saving to GGUF: <https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf>
+
+**Ollama** — runtime target. The `serve/modelfile.py` generator emits a `SYSTEM`/`TEMPLATE` block matching the trainer's ChatML render byte-for-byte.
+- Import docs: <https://docs.ollama.com/import>
+- Modelfile reference: <https://docs.ollama.com/modelfile>
+
+**Qwen models** — student / teacher candidates.
+- `Qwen/Qwen2.5-Coder-3B-Instruct` (primary student): <https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct>
+- `Qwen/Qwen2.5-Coder-7B-Instruct` (Phase 2 student): <https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct>
+- `Qwen/Qwen3-Coder-30B-A3B-Instruct` (potential teacher): <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>
+- Qwen3-Coder blog: <https://qwenlm.github.io/blog/qwen3-coder/>
 
 ---
 
