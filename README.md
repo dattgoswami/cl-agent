@@ -435,9 +435,9 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 
 | Decision | Rationale |
 |----------|-----------|
-| SDK over CLI | The Codex Python SDK returns typed `ThreadItem` objects. Log parsing is brittle; structured items are versioned. |
+| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, JSON CLI output if available, text scraping only as a last resort. Structured data gives typed events, cleaner tests, and fidelity that log parsing cannot match. |
 | File-first persistence | Zero operational overhead, human-readable, git-diffable, portable to any agent that can read a file. |
-| Two explicit modes | Mixing Codex native memory into baseline experiments invalidates learning attribution. |
+| Two explicit modes | Mixing agent-native memory into baseline experiments invalidates learning attribution. The `baseline` / `integrated` distinction holds across adapters regardless of how each agent implements its own memory. |
 | `reward = None` at record time | Raw observable outcomes come before derived reward. Later evaluation can compute multiple reward framings from the same episode. |
 | Rule-based distillation first | Deterministic rules make the learning loop testable and auditable. LLM synthesis is an optimization, not a foundation. |
 | No vector search in v1 | Domain keyword filtering is sufficient to prove the substrate claim before adding retrieval infrastructure risk. |
