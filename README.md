@@ -15,12 +15,13 @@ The two systems are kept deliberately separate. The symbolic layer stays inspect
 
 ## What This Is
 
-This repo ships two things:
+This repo ships the core substrate plus thin agent-surface adapters:
 
 | Package | Path | Purpose |
 |---------|------|---------|
 | **CL Layer** | `cl-layer/` | Core substrate: episode capture, replay buffer, rule-based distillation, evaluation hooks |
 | **Codex Adapter** | `adapters/codex/` | Thin adapter that drives Codex via its Python SDK and maps structured `ThreadItem` outputs into normalized episodes |
+| **Pi Monorepo Adapter** | `adapters/pi_mono/` | Import-first adapter that maps Pi coding-agent session JSONL into normalized episodes |
 
 It is **not** a new coding agent, a replacement for Codex, or a generic orchestration framework. It is the connective tissue between existing agent surfaces and a durable learning loop.
 
@@ -65,17 +66,25 @@ Removing any one pillar degrades the project into something less useful: without
 ┌────────────────────────────────────────────────────────────┐
 │ Agent Surface                                              │
 │                                                            │
-│  Codex (v1)   ·   Hermes (planned)   ·   others later     │
-└────────────────────────────┬───────────────────────────────┘
-                             │
-                             ▼
-┌────────────────────────────────────────────────────────────┐
-│ Thin Adapter   (adapters/codex/)                           │
-│                                                            │
-│  context_builder.py  →  assembles run context explicitly   │
-│  sdk_runner.py       →  drives Codex thread lifecycle      │
-│  item_mapper.py      →  maps ThreadItems → episode events  │
-└────────────────────────────┬───────────────────────────────┘
+│  Codex (live)   ·   Pi coding-agent (live)   ·   others   │
+└──────────────┬───────────────────────────────┬────────────┘
+               │                               │
+               ▼                               ▼
+┌──────────────────────────┐   ┌───────────────────────────┐
+│ Codex Adapter            │   │ Pi Adapter                │
+│ (adapters/codex/)        │   │ (adapters/pi_mono/)       │
+│                          │   │                           │
+│ context_builder.py       │   │ session_loader.py         │
+│   assembles RunContext   │   │   parses session JSONL    │
+│ sdk_runner.py            │   │ item_mapper.py            │
+│   drives Codex SDK       │   │   maps entries → events   │
+│ item_mapper.py           │   │ context_builder.py        │
+│   ThreadItems → events   │   │   builds PiRunContext     │
+│                          │   │ runner.py                 │
+│                          │   │   thin CLI dispatcher     │
+└──────────────┬───────────┘   └───────────────┬───────────┘
+               └───────────────┬───────────────┘
+                               │
                              │
                              ▼
 ┌────────────────────────────────────────────────────────────┐
@@ -170,11 +179,18 @@ cl-agent/
 │           └── modes.py            # baseline / symbolic / search / search_sft
 │
 ├── adapters/
-│   └── codex/
+│   ├── codex/
+│   │   ├── README.md
+│   │   ├── context_builder.py
+│   │   ├── item_mapper.py
+│   │   └── sdk_runner.py
+│   └── pi_mono/
 │       ├── README.md
-│       ├── context_builder.py
+│       ├── session_loader.py
 │       ├── item_mapper.py
-│       └── sdk_runner.py
+│       ├── context_builder.py
+│       ├── runner.py
+│       └── time_utils.py
 │
 ├── benchmarks/                     # v2: benchmark fixtures
 │   └── example_suite.json          # 3 tasks across all 3 categories
@@ -207,13 +223,13 @@ pip install -e /path/to/codex/sdk/python   # Codex SDK
 
 ```bash
 python -m pytest cl-layer/tests/ -v
-# 252 tests, all passing in <0.2s
+# 263+ tests, all passing in <0.2s  (run pytest -q for current count)
 # no network, no MLX, no Torch, no Ollama, no real model calls
 ```
 
 The full suite imports cleanly without any optional ML dependency installed (MLX, Torch, Transformers, PEFT, TRL, Unsloth, requests, PyYAML are all lazy or test-injected).
 
-### 3. Run a task through the adapter
+### 3a. Run a task through the Codex adapter
 
 ```python
 from adapters.codex.sdk_runner import CodexRunner
@@ -235,6 +251,34 @@ episode = runner.run(
 print(episode.outcome.status)          # "completed" | "partial" | "failed"
 print(episode.outcome.files_touched)
 ```
+
+### 3b. Capture a Pi session through the Pi adapter
+
+The Pi adapter is import-first: run Pi normally, then import the JSONL it wrote.
+
+```bash
+# 1. Run Pi on a task (Pi writes a session JSONL automatically)
+pi "Add a /healthz endpoint to main.py" --cwd /path/to/your/repo
+```
+
+```python
+# 2. Import the session into the substrate
+from adapters.pi_mono import append_session_episode
+
+episode = append_session_episode(
+    "/path/to/pi/session.jsonl",   # consult `pi sessions list` or Pi docs for exact path
+    "data/episodes.jsonl",
+    task_id="task-001",
+    task_domain="fastapi",
+    task_description="Add a /healthz endpoint to main.py",
+    mode="baseline",
+)
+
+print(episode.outcome.status)
+print(episode.outcome.files_touched)  # only proven mutations (edit/write)
+```
+
+See `adapters/pi_mono/README.md` for branch selection, integrated mode, and the full loop.
 
 ### 4. Distil and write learning artifacts
 
@@ -259,32 +303,50 @@ Path("data/PROGRAM.md").write_text(render_program_md("fastapi", skills, warnings
 
 ### 5. Run again in integrated mode
 
-On the second run the adapter reads `PROGRAM.md` and `SKILLS.md` and injects them as `developer_instructions` before the task executes:
+On the second run each adapter reads `PROGRAM.md` and `SKILLS.md` and injects them before the task executes.
+
+**Codex** — injected as `developer_instructions` on the SDK thread:
 
 ```python
 episode = runner.run(
     task_prompt="Add a /readyz endpoint to main.py.",
     task_id="task-002",
     task_domain="fastapi",
-    mode="integrated",        # persistent thread, substrate artifacts injected
+    mode="integrated",        # persistent thread, substrate artifacts injected as developer_instructions
     cwd="/path/to/your/repo",
 )
+```
+
+**Pi** — injected via `--append-system-prompt` on the CLI command:
+
+```python
+from adapters.pi_mono import PiCliRunner
+
+runner = PiCliRunner(artifacts_dir="data/")
+result = runner.run(
+    "Add a /readyz endpoint to main.py.",
+    mode="integrated",        # injects PROGRAM.md + SKILLS.md via --append-system-prompt
+    cwd="/path/to/your/repo",
+)
+# Then import the session JSONL Pi wrote and repeat from step 2 of section 3b.
 ```
 
 ---
 
 ## Operating Modes
 
-| Mode | Codex thread | Substrate injection | Use for |
-|------|-------------|---------------------|---------|
-| `baseline` | `ephemeral=True` — native memory minimized | Off | Controlled experiments; substrate is the only cross-session signal |
-| `integrated` | Persistent — native memory coexists | On — `PROGRAM.md` + `SKILLS.md` injected as `developer_instructions` | Daily use where both memory systems coexist |
+| Mode | Codex | Pi | Substrate injection | Use for |
+|------|-------|----|---------------------|---------|
+| `baseline` | `ephemeral=True` — native memory minimized | `--no-session` — ephemeral run | Off | Controlled experiments; substrate is the only cross-session signal |
+| `integrated` | Persistent — native memory coexists | Normal session | On — `PROGRAM.md` + `SKILLS.md` injected (`developer_instructions` for Codex; `--append-system-prompt` for Pi) | Daily use where both memory systems coexist |
 
-The distinction matters for research integrity: improvement claims from `baseline` runs cannot be contaminated by Codex's own memory pipeline.
+The distinction matters for research integrity: improvement claims from `baseline` runs cannot be contaminated by agent-native memory pipelines.
 
 ---
 
 ## Session Loop
+
+### Codex (live driving)
 
 ```
 Pre-run
@@ -295,9 +357,29 @@ Pre-run
 Run
   adapter calls thread.run(task_prompt)
   Codex executes the task, returning structured ThreadItems
-  adapter maps items → normalized EpisodeEvents
+  adapter maps ThreadItems → normalized EpisodeEvents
 
 Post-run
+  substrate writes episode to episodes.jsonl
+  distill/skills.py  → updates SKILLS.md
+  distill/dreams.py  → updates DREAMS.md
+  distill/program.py → updates PROGRAM.md for the next run
+```
+
+### Pi (import-first)
+
+```
+Pre-run (integrated mode only)
+  ContextBuilder reads PROGRAM.md + SKILLS.md
+  PiCliRunner passes --append-system-prompt <artifacts> to the Pi CLI
+
+Run
+  Pi executes the task externally, writing an append-only session JSONL file
+
+Post-run
+  import_session_jsonl / append_session_episode reads the JSONL
+  session_loader selects the active branch (last leaf → root walk)
+  item_mapper maps entries → normalized EpisodeEvents + EpisodeOutcome
   substrate writes episode to episodes.jsonl
   distill/skills.py  → updates SKILLS.md
   distill/dreams.py  → updates DREAMS.md
@@ -328,7 +410,8 @@ All four files are human-readable and git-diffable. If a skill entry looks wrong
 | 0 — Architecture lock | Done | `spec.md`, `spec-validation.md`, `plan.md` |
 | 1 — Core data plane | Done | `episode/`, `replay/` |
 | 2 — Distillation | Done | `distill/skills.py`, `distill/dreams.py`, `distill/program.py` |
-| 3 — Codex adapter | Done | `adapters/codex/` grounded in the local SDK |
+| 3 — Codex adapter | Done | `adapters/codex/` — live SDK driving, `ThreadItem` mapping |
+| 3b — Pi adapter | Done | `adapters/pi_mono/` — import-first JSONL capture, branch selection, integrated-mode injection |
 
 ### v2 — SOAR-style search + SFT pipeline
 
@@ -366,6 +449,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 
 - **CL Layer** — `cl-layer/README.md`: episode model, distillation policy, evaluation design, contribution guidelines, architectural guardrails
 - **Codex Adapter** — `adapters/codex/README.md`: setup, mode semantics, item-type mapping table, integration details
+- **Pi Monorepo Adapter** — `adapters/pi_mono/README.md`: Pi session JSONL importer, mode semantics, event mapping, live-run boundary
 
 ---
 
