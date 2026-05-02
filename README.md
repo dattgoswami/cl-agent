@@ -22,6 +22,7 @@ This repo ships the core substrate plus thin agent-surface adapters:
 | **CL Layer** | `cl-layer/` | Core substrate: episode capture, replay buffer, rule-based distillation, evaluation hooks |
 | **Codex Adapter** | `adapters/codex/` | Thin adapter that drives Codex via its Python SDK and maps structured `ThreadItem` outputs into normalized episodes |
 | **Pi Monorepo Adapter** | `adapters/pi_mono/` | Import-first adapter that maps Pi coding-agent session JSONL into normalized episodes |
+| **Hermes Agent Adapter** | `adapters/hermes_agent/` | Import-first adapter that maps Hermes ShareGPT-style batch trajectories into normalized episodes |
 
 It is **not** a new coding agent, a replacement for Codex, or a generic orchestration framework. It is the connective tissue between existing agent surfaces and a durable learning loop.
 
@@ -66,7 +67,7 @@ Removing any one pillar degrades the project into something less useful: without
 ┌────────────────────────────────────────────────────────────┐
 │ Agent Surface                                              │
 │                                                            │
-│  Codex (live)   ·   Pi coding-agent (live)   ·   others   │
+│  Codex (live) · Pi coding-agent · Hermes batch · others   │
 └──────────────┬───────────────────────────────┬────────────┘
                │                               │
                ▼                               ▼
@@ -280,6 +281,28 @@ print(episode.outcome.files_touched)  # only proven mutations (edit/write)
 
 See `adapters/pi_mono/README.md` for branch selection, integrated mode, and the full loop.
 
+### 3c. Capture Hermes batch trajectories
+
+The Hermes adapter is import-first: run Hermes batch generation separately, then
+import its `trajectories.jsonl`.
+
+```python
+from adapters.hermes_agent import append_trajectory_episodes
+
+episodes = append_trajectory_episodes(
+    "/path/to/hermes/run/trajectories.jsonl",
+    "data/episodes.jsonl",
+    task_id_prefix="hermes-task",
+    task_domain="python",
+    mode="baseline",
+)
+
+print(len(episodes))
+```
+
+See `adapters/hermes_agent/README.md` for supported formats, mode semantics,
+Hermes native-memory attribution notes, and current limitations.
+
 ### 4. Distil and write learning artifacts
 
 ```python
@@ -412,6 +435,7 @@ All four files are human-readable and git-diffable. If a skill entry looks wrong
 | 2 — Distillation | Done | `distill/skills.py`, `distill/dreams.py`, `distill/program.py` |
 | 3 — Codex adapter | Done | `adapters/codex/` — live SDK driving, `ThreadItem` mapping |
 | 3b — Pi adapter | Done | `adapters/pi_mono/` — import-first JSONL capture, branch selection, integrated-mode injection |
+| 3c — Hermes adapter | Done | `adapters/hermes_agent/` — import-first batch trajectory capture, XML tool-call parsing, native-memory attribution docs |
 
 ### v2 — SOAR-style search + SFT pipeline
 
@@ -435,7 +459,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 
 | Decision | Rationale |
 |----------|-----------|
-| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, JSON CLI output if available, text scraping only as a last resort. Structured data gives typed events, cleaner tests, and fidelity that log parsing cannot match. |
+| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, ShareGPT-style batch trajectory JSONL for Hermes, JSON CLI output if available, text scraping only as a last resort. Structured data gives typed events, cleaner tests, and fidelity that log parsing cannot match. |
 | File-first persistence | Zero operational overhead, human-readable, git-diffable, portable to any agent that can read a file. |
 | Two explicit modes | Mixing agent-native memory into baseline experiments invalidates learning attribution. The `baseline` / `integrated` distinction holds across adapters regardless of how each agent implements its own memory. |
 | `reward = None` at record time | Raw observable outcomes come before derived reward. Later evaluation can compute multiple reward framings from the same episode. |
@@ -450,6 +474,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 - **CL Layer** — `cl-layer/README.md`: episode model, distillation policy, evaluation design, contribution guidelines, architectural guardrails
 - **Codex Adapter** — `adapters/codex/README.md`: setup, mode semantics, item-type mapping table, integration details
 - **Pi Monorepo Adapter** — `adapters/pi_mono/README.md`: Pi session JSONL importer, mode semantics, event mapping, live-run boundary
+- **Hermes Agent Adapter** — `adapters/hermes_agent/README.md`: Hermes batch trajectory importer, mode semantics, event mapping, native-memory separation
 
 ---
 
