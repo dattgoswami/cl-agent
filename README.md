@@ -24,6 +24,7 @@ This repo ships the core substrate plus thin agent-surface adapters:
 | **Pi Monorepo Adapter** | `adapters/pi_mono/` | Import-first adapter that maps Pi coding-agent session JSONL into normalized episodes |
 | **Hermes Agent Adapter** | `adapters/hermes_agent/` | Import-first adapter that maps Hermes ShareGPT-style batch trajectories into normalized episodes |
 | **Aider Adapter** | `adapters/aider/` | Conservative CLI/git adapter that maps Aider subprocess, chat history, and git diff evidence into normalized episodes |
+| **SWE-agent Adapter** | `adapters/swe_agent/` | Import-first adapter that maps full SWE-agent `.traj` JSON files into normalized episodes |
 
 It is **not** a new coding agent, a replacement for Codex, or a generic orchestration framework. It is the connective tissue between existing agent surfaces and a durable learning loop.
 
@@ -68,7 +69,7 @@ Removing any one pillar degrades the project into something less useful: without
 ┌────────────────────────────────────────────────────────────┐
 │ Agent Surface                                              │
 │                                                            │
-│  Codex (live) · Pi coding-agent · Hermes batch · Aider CLI │
+│  Codex · Pi coding-agent · Hermes · Aider · SWE-agent       │
 └──────────────┬───────────────────────────────┬────────────┘
                │                               │
                ▼                               ▼
@@ -346,6 +347,30 @@ print(episode.patch_hash)
 
 By default the runner disables Aider auto-commits and dirty pre-edit commits so the adapter can capture the resulting working-tree patch. It also disables restored chat history and uses per-run capture files under `aider-captures/<run_id>/`.
 
+### 3e. Capture SWE-agent trajectories
+
+The SWE-agent adapter imports full `.traj` JSON files after a `sweagent run` or
+`sweagent run-batch` execution. It does not run Docker, model calls, or
+SWE-bench evaluation during import.
+
+```python
+from adapters.swe_agent import append_trajectory_episode
+
+episode = append_trajectory_episode(
+    "/path/to/trajectories/run/pydicom__pydicom-1458.traj",
+    "data/episodes.jsonl",
+    task_domain="swe_bench",
+    mode="baseline",
+)
+
+print(episode.outcome.status)
+print(episode.outcome.files_touched)
+print(episode.patch_hash)
+```
+
+See `adapters/swe_agent/README.md` for supported `.traj` variants, config
+overlay semantics, mapping notes, and deferred live-run work.
+
 ### 4. Distil and write learning artifacts
 
 ```python
@@ -493,6 +518,31 @@ Post-run
 
 The Aider adapter intentionally avoids parsing assistant prose as edit evidence. `files_touched`, `patch_text`, and `patch_hash` come from git. If the worktree was already dirty before the run, the adapter avoids attributing pre-existing dirty paths or diffs to Aider.
 
+### SWE-agent (trajectory import)
+
+```
+Pre-run
+  ContextBuilder can write an explicit SWE-agent config overlay
+  baseline clears demonstrations and injects no CL artifacts
+  integrated injects PROGRAM.md + SKILLS.md through strategy_template
+
+Run
+  SWE-agent executes externally and writes <instance_id>.traj
+
+Post-run
+  load_trajectory reads the full .traj JSON plus adjacent config when present
+  item_mapper maps history, thought/action/observation turns, commands, edits, and submission diffs
+  info.submission becomes patch_text + patch_hash when present
+  substrate writes episode to episodes.jsonl
+  distill/skills.py  → updates SKILLS.md
+  distill/dreams.py  → updates DREAMS.md
+  distill/program.py → updates PROGRAM.md for the next run
+```
+
+SWE-bench pass/fail is usually produced outside the `.traj` file. The adapter
+records `benchmark_result` only when the trajectory `info` object explicitly
+contains resolved or benchmark output.
+
 ---
 
 ## Persistent Artifacts
@@ -521,6 +571,7 @@ All four files are human-readable and git-diffable. If a skill entry looks wrong
 | 3b — Pi adapter | Done | `adapters/pi_mono/` — import-first JSONL capture, branch selection, integrated-mode injection |
 | 3c — Hermes adapter | Done | `adapters/hermes_agent/` — import-first batch trajectory capture, XML tool-call parsing, native-memory attribution docs |
 | 3d — Aider adapter | Done | `adapters/aider/` — CLI subprocess capture, run-specific chat history parsing, safe git diff attribution |
+| 3e — SWE-agent adapter | Done | `adapters/swe_agent/` — full `.traj` import, submission patch capture, explicit config overlay preview |
 
 ### v2 — SOAR-style search + SFT pipeline
 
@@ -544,7 +595,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 
 | Decision | Rationale |
 |----------|-----------|
-| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, ShareGPT-style batch trajectory JSONL for Hermes, and git/subprocess evidence for Aider because no stable event stream is exposed. Text scraping is limited to coarse chat/tool messages and is never the authority for file changes. |
+| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, ShareGPT-style batch trajectory JSONL for Hermes, git/subprocess evidence for Aider, and full `.traj` JSON for SWE-agent. Text scraping is limited to coarse chat/tool messages and is never the authority for file changes. |
 | File-first persistence | Zero operational overhead, human-readable, git-diffable, portable to any agent that can read a file. |
 | Two explicit modes | Mixing agent-native memory into baseline experiments invalidates learning attribution. The `baseline` / `integrated` distinction holds across adapters regardless of how each agent implements its own memory. |
 | `reward = None` at record time | Raw observable outcomes come before derived reward. Later evaluation can compute multiple reward framings from the same episode. |
@@ -561,6 +612,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 - **Pi Monorepo Adapter** — `adapters/pi_mono/README.md`: Pi session JSONL importer, mode semantics, event mapping, live-run boundary
 - **Hermes Agent Adapter** — `adapters/hermes_agent/README.md`: Hermes batch trajectory importer, mode semantics, event mapping, native-memory separation
 - **Aider Adapter** — `adapters/aider/README.md`: CLI/git capture, safe defaults around auto-commits, chat-history parsing, event mapping, limitations
+- **SWE-agent Adapter** — `adapters/swe_agent/README.md`: full `.traj` importer, mode semantics, event mapping, config overlay preview, benchmark notes
 
 ---
 
