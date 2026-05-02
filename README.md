@@ -186,13 +186,25 @@ cl-agent/
 │   │   ├── context_builder.py
 │   │   ├── item_mapper.py
 │   │   └── sdk_runner.py
-│   └── pi_mono/
+│   ├── pi_mono/
+│   │   ├── README.md
+│   │   ├── session_loader.py
+│   │   ├── item_mapper.py
+│   │   ├── context_builder.py
+│   │   ├── runner.py
+│   │   └── time_utils.py
+│   ├── hermes_agent/
+│   │   ├── README.md
+│   │   ├── trajectory_loader.py
+│   │   ├── item_mapper.py
+│   │   ├── context_builder.py
+│   │   └── runner.py
+│   └── aider/
 │       ├── README.md
-│       ├── session_loader.py
+│       ├── log_loader.py
 │       ├── item_mapper.py
 │       ├── context_builder.py
-│       ├── runner.py
-│       └── time_utils.py
+│       └── runner.py
 │
 ├── benchmarks/                     # v2: benchmark fixtures
 │   └── example_suite.json          # 3 tasks across all 3 categories
@@ -225,7 +237,7 @@ pip install -e /path/to/codex/sdk/python   # Codex SDK
 
 ```bash
 python -m pytest cl-layer/tests/ -v
-# 263+ tests, all passing in <0.2s  (run pytest -q for current count)
+# 281+ tests, all passing in <1s  (run pytest -q for current count)
 # no network, no MLX, no Torch, no Ollama, no real model calls
 ```
 
@@ -304,6 +316,36 @@ print(len(episodes))
 See `adapters/hermes_agent/README.md` for supported formats, mode semantics,
 Hermes native-memory attribution notes, and current limitations.
 
+### 3d. Run and capture Aider through the Aider adapter
+
+The Aider adapter is conservative: it runs Aider through an injectable CLI boundary and records subprocess output, run-specific chat history, and git evidence before/after the run.
+
+```python
+from adapters.aider import AiderRunner
+
+runner = AiderRunner(
+    "data/episodes.jsonl",
+    artifacts_dir="data/",
+)
+
+episode = runner.run(
+    "Fix the failing pytest case.",
+    task_id="task-001",
+    task_domain="python",
+    mode="baseline",
+    cwd="/path/to/your/git/repo",
+    model="sonnet",
+    test_cmd="pytest -q",
+    auto_test=True,
+)
+
+print(episode.outcome.status)
+print(episode.outcome.files_touched)
+print(episode.patch_hash)
+```
+
+By default the runner disables Aider auto-commits and dirty pre-edit commits so the adapter can capture the resulting working-tree patch. It also disables restored chat history and uses per-run capture files under `aider-captures/<run_id>/`.
+
 ### 4. Distil and write learning artifacts
 
 ```python
@@ -355,14 +397,29 @@ result = runner.run(
 # Then import the session JSONL Pi wrote and repeat from step 2 of section 3b.
 ```
 
+**Aider** — injected into the one-shot `--message` prompt:
+
+```python
+from adapters.aider import AiderRunner
+
+runner = AiderRunner("data/episodes.jsonl", artifacts_dir="data/")
+episode = runner.run(
+    "Add a /readyz endpoint to main.py.",
+    task_id="task-002",
+    task_domain="fastapi",
+    mode="integrated",        # prepends PROGRAM.md + SKILLS.md to the Aider message
+    cwd="/path/to/your/repo",
+)
+```
+
 ---
 
 ## Operating Modes
 
-| Mode | Codex | Pi | Substrate injection | Use for |
-|------|-------|----|---------------------|---------|
-| `baseline` | `ephemeral=True` — native memory minimized | `--no-session` — ephemeral run | Off | Controlled experiments; substrate is the only cross-session signal |
-| `integrated` | Persistent — native memory coexists | Normal session | On — `PROGRAM.md` + `SKILLS.md` injected (`developer_instructions` for Codex; `--append-system-prompt` for Pi) | Daily use where both memory systems coexist |
+| Mode | Codex | Pi | Aider | Substrate injection | Use for |
+|------|-------|----|-------|---------------------|---------|
+| `baseline` | `ephemeral=True` — native memory minimized | `--no-session` — ephemeral run | run-specific history files; no restored chat | Off | Controlled experiments; substrate is the only cross-session signal |
+| `integrated` | Persistent — native memory coexists | Normal session | run-specific history files; CL artifacts prepended to prompt | On — `PROGRAM.md` + `SKILLS.md` injected (`developer_instructions` for Codex; `--append-system-prompt` for Pi; `--message` for Aider) | Daily use where both memory systems coexist |
 
 The distinction matters for research integrity: improvement claims from `baseline` runs cannot be contaminated by agent-native memory pipelines.
 
@@ -410,6 +467,32 @@ Post-run
   distill/program.py → updates PROGRAM.md for the next run
 ```
 
+### Aider (CLI/git capture)
+
+```
+Pre-run
+  ContextBuilder reads PROGRAM.md + SKILLS.md (integrated mode only)
+  AiderRunner creates a run-specific capture directory
+  adapter snapshots git HEAD/status/diff before execution
+  adapter runs aider --message <task> with safe capture flags
+
+Run
+  Aider executes externally
+  adapter captures subprocess stdout/stderr
+  Aider writes chat, input, and LLM history files under aider-captures/<run_id>/
+
+Post-run
+  adapter snapshots git HEAD/status/diff after execution
+  log_loader parses Aider chat history into coarse user/assistant/tool messages
+  item_mapper maps subprocess, command-output, chat, and git-diff evidence
+  substrate writes episode to episodes.jsonl
+  distill/skills.py  → updates SKILLS.md
+  distill/dreams.py  → updates DREAMS.md
+  distill/program.py → updates PROGRAM.md for the next run
+```
+
+The Aider adapter intentionally avoids parsing assistant prose as edit evidence. `files_touched`, `patch_text`, and `patch_hash` come from git. If the worktree was already dirty before the run, the adapter avoids attributing pre-existing dirty paths or diffs to Aider.
+
 ---
 
 ## Persistent Artifacts
@@ -437,6 +520,7 @@ All four files are human-readable and git-diffable. If a skill entry looks wrong
 | 3 — Codex adapter | Done | `adapters/codex/` — live SDK driving, `ThreadItem` mapping |
 | 3b — Pi adapter | Done | `adapters/pi_mono/` — import-first JSONL capture, branch selection, integrated-mode injection |
 | 3c — Hermes adapter | Done | `adapters/hermes_agent/` — import-first batch trajectory capture, XML tool-call parsing, native-memory attribution docs |
+| 3d — Aider adapter | Done | `adapters/aider/` — CLI subprocess capture, run-specific chat history parsing, safe git diff attribution |
 
 ### v2 — SOAR-style search + SFT pipeline
 
@@ -460,7 +544,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 
 | Decision | Rationale |
 |----------|-----------|
-| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, ShareGPT-style batch trajectory JSONL for Hermes, JSON CLI output if available, text scraping only as a last resort. Structured data gives typed events, cleaner tests, and fidelity that log parsing cannot match. |
+| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, ShareGPT-style batch trajectory JSONL for Hermes, and git/subprocess evidence for Aider because no stable event stream is exposed. Text scraping is limited to coarse chat/tool messages and is never the authority for file changes. |
 | File-first persistence | Zero operational overhead, human-readable, git-diffable, portable to any agent that can read a file. |
 | Two explicit modes | Mixing agent-native memory into baseline experiments invalidates learning attribution. The `baseline` / `integrated` distinction holds across adapters regardless of how each agent implements its own memory. |
 | `reward = None` at record time | Raw observable outcomes come before derived reward. Later evaluation can compute multiple reward framings from the same episode. |
@@ -476,6 +560,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 - **Codex Adapter** — `adapters/codex/README.md`: setup, mode semantics, item-type mapping table, integration details
 - **Pi Monorepo Adapter** — `adapters/pi_mono/README.md`: Pi session JSONL importer, mode semantics, event mapping, live-run boundary
 - **Hermes Agent Adapter** — `adapters/hermes_agent/README.md`: Hermes batch trajectory importer, mode semantics, event mapping, native-memory separation
+- **Aider Adapter** — `adapters/aider/README.md`: CLI/git capture, safe defaults around auto-commits, chat-history parsing, event mapping, limitations
 
 ---
 
