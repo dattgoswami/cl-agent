@@ -23,6 +23,7 @@ This repo ships the core substrate plus thin agent-surface adapters:
 | **Codex Adapter** | `adapters/codex/` | Thin adapter that drives Codex via its Python SDK and maps structured `ThreadItem` outputs into normalized episodes |
 | **Pi Monorepo Adapter** | `adapters/pi_mono/` | Import-first adapter that maps Pi coding-agent session JSONL into normalized episodes |
 | **Hermes Agent Adapter** | `adapters/hermes_agent/` | Import-first adapter that maps Hermes ShareGPT-style batch trajectories into normalized episodes |
+| **Aider Adapter** | `adapters/aider/` | Conservative CLI/git adapter that maps Aider subprocess, chat history, and git diff evidence into normalized episodes |
 
 It is **not** a new coding agent, a replacement for Codex, or a generic orchestration framework. It is the connective tissue between existing agent surfaces and a durable learning loop.
 
@@ -67,7 +68,7 @@ Removing any one pillar degrades the project into something less useful: without
 ┌────────────────────────────────────────────────────────────┐
 │ Agent Surface                                              │
 │                                                            │
-│  Codex (live) · Pi coding-agent · Hermes batch · others   │
+│  Codex (live) · Pi coding-agent · Hermes batch · Aider CLI │
 └──────────────┬───────────────────────────────┬────────────┘
                │                               │
                ▼                               ▼
