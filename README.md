@@ -25,6 +25,7 @@ This repo ships the core substrate plus thin agent-surface adapters:
 | **Hermes Agent Adapter** | `adapters/hermes_agent/` | Import-first adapter that maps Hermes ShareGPT-style batch trajectories into normalized episodes |
 | **Aider Adapter** | `adapters/aider/` | Conservative CLI/git adapter that maps Aider subprocess, chat history, and git diff evidence into normalized episodes |
 | **SWE-agent Adapter** | `adapters/swe_agent/` | Import-first adapter that maps full SWE-agent `.traj` JSON files into normalized episodes |
+| **OpenHands Adapter** | `adapters/openhands/` | Import-first adapter that maps OpenHands V1 conversation exports into normalized episodes |
 
 It is **not** a new coding agent, a replacement for Codex, or a generic orchestration framework. It is the connective tissue between existing agent surfaces and a durable learning loop.
 
@@ -70,6 +71,7 @@ Removing any one pillar degrades the project into something less useful: without
 │ Agent Surface                                              │
 │                                                            │
 │  Codex · Pi coding-agent · Hermes · Aider · SWE-agent       │
+│  OpenHands                                                 │
 └──────────────┬───────────────────────────────┬────────────┘
                │                               │
                ▼                               ▼
@@ -371,6 +373,30 @@ print(episode.patch_hash)
 See `adapters/swe_agent/README.md` for supported `.traj` variants, config
 overlay semantics, mapping notes, and deferred live-run work.
 
+### 3f. Capture OpenHands V1 conversations
+
+The OpenHands adapter imports V1 exported conversation ZIP files or filesystem
+conversation directories. It does not start the OpenHands app server, Docker,
+GUI, SDK runtime, or model calls during import.
+
+```python
+from adapters.openhands import append_conversation_episode
+
+episode = append_conversation_episode(
+    "/path/to/conversations/conv-abc123.zip",
+    "data/episodes.jsonl",
+    task_domain="software_engineering",
+    mode="baseline",
+)
+
+print(episode.outcome.status)
+print(episode.outcome.files_touched)
+print(episode.patch_hash)
+```
+
+See `adapters/openhands/README.md` for the V1 event boundary, mapping table,
+integrated-mode skill injection, and deferred live-run notes.
+
 ### 4. Distil and write learning artifacts
 
 ```python
@@ -435,6 +461,19 @@ episode = runner.run(
     mode="integrated",        # prepends PROGRAM.md + SKILLS.md to the Aider message
     cwd="/path/to/your/repo",
 )
+```
+
+**OpenHands** — copied to namespaced custom skill files before launching the external run:
+
+```python
+from adapters.openhands import ContextBuilder
+
+ctx = ContextBuilder("data/").build(
+    "Add a /readyz endpoint to main.py.",
+    mode="integrated",        # writes cl-program.md + cl-skills.md under .openhands/skills/
+    cwd="/path/to/your/repo",
+)
+# Launch OpenHands externally, then import the exported V1 conversation.
 ```
 
 ---
@@ -543,6 +582,27 @@ SWE-bench pass/fail is usually produced outside the `.traj` file. The adapter
 records `benchmark_result` only when the trajectory `info` object explicitly
 contains resolved or benchmark output.
 
+### OpenHands (V1 conversation import)
+
+```
+Pre-run
+  baseline injects no CL artifacts
+  integrated copies PROGRAM.md + SKILLS.md to .openhands/skills/cl-*.md
+  OpenHands executes externally
+
+Post-run
+  export or locate the V1 conversation ZIP/directory
+  load_conversation reads meta.json and event JSON files
+  item_mapper maps actions, observations, state updates, hooks, and errors
+  substrate writes episode to episodes.jsonl
+  distill/skills.py  → updates SKILLS.md
+  distill/dreams.py  → updates DREAMS.md
+  distill/program.py → updates PROGRAM.md for the next run
+```
+
+OpenHands import fails fast on malformed event JSON so corrupted conversation
+exports do not silently produce plausible training episodes.
+
 ---
 
 ## Persistent Artifacts
@@ -572,6 +632,7 @@ All four files are human-readable and git-diffable. If a skill entry looks wrong
 | 3c — Hermes adapter | Done | `adapters/hermes_agent/` — import-first batch trajectory capture, XML tool-call parsing, native-memory attribution docs |
 | 3d — Aider adapter | Done | `adapters/aider/` — CLI subprocess capture, run-specific chat history parsing, safe git diff attribution |
 | 3e — SWE-agent adapter | Done | `adapters/swe_agent/` — full `.traj` import, submission patch capture, explicit config overlay preview |
+| 3f — OpenHands adapter | Done | `adapters/openhands/` — V1 conversation export import, state/error mapping, namespaced skill injection |
 
 ### v2 — SOAR-style search + SFT pipeline
 
@@ -595,7 +656,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 
 | Decision | Rationale |
 |----------|-----------|
-| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, ShareGPT-style batch trajectory JSONL for Hermes, git/subprocess evidence for Aider, and full `.traj` JSON for SWE-agent. Text scraping is limited to coarse chat/tool messages and is never the authority for file changes. |
+| Structured data over text scraping | Each adapter consumes the most structured interface the agent exposes: typed SDK objects for Codex (`ThreadItem`), session JSONL for Pi, ShareGPT-style batch trajectory JSONL for Hermes, git/subprocess evidence for Aider, full `.traj` JSON for SWE-agent, and V1 conversation exports for OpenHands. Text scraping is limited to coarse chat/tool messages and is never the authority for file changes. |
 | File-first persistence | Zero operational overhead, human-readable, git-diffable, portable to any agent that can read a file. |
 | Two explicit modes | Mixing agent-native memory into baseline experiments invalidates learning attribution. The `baseline` / `integrated` distinction holds across adapters regardless of how each agent implements its own memory. |
 | `reward = None` at record time | Raw observable outcomes come before derived reward. Later evaluation can compute multiple reward framings from the same episode. |
@@ -613,6 +674,7 @@ The v2 plane was added on top of v1 to close the "second half of the loop": sear
 - **Hermes Agent Adapter** — `adapters/hermes_agent/README.md`: Hermes batch trajectory importer, mode semantics, event mapping, native-memory separation
 - **Aider Adapter** — `adapters/aider/README.md`: CLI/git capture, safe defaults around auto-commits, chat-history parsing, event mapping, limitations
 - **SWE-agent Adapter** — `adapters/swe_agent/README.md`: full `.traj` importer, mode semantics, event mapping, config overlay preview, benchmark notes
+- **OpenHands Adapter** — `adapters/openhands/README.md`: V1 conversation importer, mode semantics, event mapping, metadata capture, deferred live-run notes
 
 ---
 
